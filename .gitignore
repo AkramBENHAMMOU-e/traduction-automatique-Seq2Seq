@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Data and Models
+data/
+models/
+*.pt
+*.pth
+
+# IDE
+.vscode/
+.idea/
+
+# Jupyter
+.ipynb_checkpoints
