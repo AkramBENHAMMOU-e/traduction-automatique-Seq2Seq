@@ -1,6 +1,6 @@
 torch
 numpy
 matplotlib
-jupyter
 kaggle
 pandas
+mlflow

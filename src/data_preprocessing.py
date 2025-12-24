@@ -87,9 +87,9 @@ def indexesFromSentence(lang, sentence):
     return [lang.word2index.get(word, UNK_token) for word in sentence.split(' ')]
 
 def tensorFromSentence(lang, sentence):
-    indexes = indexesFromSentence(lang, sentence)
+    indexes = [SOS_token] + indexesFromSentence(lang, sentence)
     indexes.append(EOS_token)
-    return torch.tensor(indexes, dtype=torch.long).view(-1, 1)
+    return torch.tensor(indexes, dtype=torch.long)
 
 class TranslationDataset(Dataset):
     def __init__(self, pairs, input_lang, output_lang):
@@ -108,13 +108,15 @@ class TranslationDataset(Dataset):
 
 # Collate function to pad batches
 def collate_fn(batch):
-    input_tensors, target_tensors, input_sentences, target_sentences = zip(*batch)
-    
-    # Pack/Pad
+    input_tensors, target_tensors, _, _ = zip(*batch)
+
+    input_lengths = [len(tensor) for tensor in input_tensors]
+    target_lengths = [len(tensor) for tensor in target_tensors]
+
     input_tensors_padded = torch.nn.utils.rnn.pad_sequence(input_tensors, padding_value=PAD_token)
     target_tensors_padded = torch.nn.utils.rnn.pad_sequence(target_tensors, padding_value=PAD_token)
-    
-    return input_tensors_padded, target_tensors_padded
+
+    return input_tensors_padded, target_tensors_padded, input_lengths, target_lengths
 
 if __name__ == '__main__':
     # Test

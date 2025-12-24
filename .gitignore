@@ -16,3 +16,6 @@ kaggle.json
 
 # Jupyter
 .ipynb_checkpoints
+
+.venv
+traduction-automatique-Seq2Seq.zip
