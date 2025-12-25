@@ -4,9 +4,8 @@ __pycache__/
 *.so
 
 # Data and Models
-models/
 kaggle.json
-*.pt
+
 *.pth
 
 # IDE
