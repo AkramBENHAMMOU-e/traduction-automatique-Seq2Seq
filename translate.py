@@ -9,18 +9,19 @@ from src.data_preprocessing import (
     EOS_token,
     Lang,
 )
-from src.models import EncoderRNN, DecoderRNN, Seq2Seq
+from src.models import EncoderRNN, DecoderRNN, Seq2Seq, AttnDecoderRNN, Seq2SeqAttn
 
 
 MODEL_DIR = "models"
 CHECKPOINT_NAME = "seq2seq_en_fr.pt"
 
 
-def load_model(device=None):
+def load_model(checkpoint_path=None, device=None):
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    checkpoint_path = os.path.join(MODEL_DIR, CHECKPOINT_NAME)
+    if checkpoint_path is None:
+        checkpoint_path = os.path.join(MODEL_DIR, CHECKPOINT_NAME)
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(
             f"Checkpoint not found at {checkpoint_path}. "
@@ -44,26 +45,44 @@ def load_model(device=None):
     output_lang = checkpoint["output_lang"]
     config = checkpoint["config"]
 
+    use_attention = bool(config.get("use_attention", False))
+    enc_bidirectional = bool(config.get("enc_bidirectional", False))
+
     encoder = EncoderRNN(
         input_vocab_size=input_lang.n_words,
         embedding_dim=config["embedding_dim"],
         hidden_size=config["hidden_size"],
         num_layers=config["num_layers"],
         dropout=config["dropout"],
+        bidirectional=enc_bidirectional,
     ).to(device)
 
-    decoder = DecoderRNN(
-        output_vocab_size=output_lang.n_words,
-        embedding_dim=config["embedding_dim"],
-        hidden_size=config["hidden_size"],
-        num_layers=config["num_layers"],
-        dropout=config["dropout"],
-    ).to(device)
+    if use_attention:
+        enc_output_dim = config["hidden_size"] * (2 if enc_bidirectional else 1)
+        decoder = AttnDecoderRNN(
+            output_vocab_size=output_lang.n_words,
+            embedding_dim=config["embedding_dim"],
+            hidden_size=config["hidden_size"],
+            enc_output_dim=enc_output_dim,
+            num_layers=config["num_layers"],
+            dropout=config["dropout"],
+        ).to(device)
+    else:
+        decoder = DecoderRNN(
+            output_vocab_size=output_lang.n_words,
+            embedding_dim=config["embedding_dim"],
+            hidden_size=config["hidden_size"],
+            num_layers=config["num_layers"],
+            dropout=config["dropout"],
+        ).to(device)
 
     encoder.load_state_dict(checkpoint["encoder_state_dict"])
     decoder.load_state_dict(checkpoint["decoder_state_dict"])
 
-    model = Seq2Seq(encoder, decoder, device).to(device)
+    if use_attention:
+        model = Seq2SeqAttn(encoder, decoder, device, enc_bidirectional=enc_bidirectional).to(device)
+    else:
+        model = Seq2Seq(encoder, decoder, device).to(device)
     model.eval()
 
     return model, input_lang, output_lang, device
@@ -79,29 +98,57 @@ def translate_sentence(sentence, model, input_lang, output_lang, device, max_len
     src_tensor = src_tensor.unsqueeze(1)  # (seq_len, 1)
 
     with torch.no_grad():
-        _, (hidden, cell) = model.encoder(src_tensor, src_length)
+        if isinstance(model, Seq2SeqAttn):
+            encoder_outputs, enc_state = model.encoder(src_tensor, src_length)
+            hidden, cell = model._init_dec_state(enc_state)
+            input_token = torch.tensor([SOS_token], dtype=torch.long, device=device)
 
-        input_token = torch.tensor([SOS_token], dtype=torch.long, device=device)
+            decoded_tokens = []
+            for _ in range(max_length):
+                output, hidden, cell = model.decoder(
+                    input_token, hidden, cell, encoder_outputs, src_length
+                )
+                top1 = output.argmax(1)
+                token_id = top1.item()
+                if token_id == EOS_token:
+                    break
+                decoded_tokens.append(token_id)
+                input_token = top1
+        else:
+            _, (hidden, cell) = model.encoder(src_tensor, src_length)
 
-        decoded_tokens = []
+            input_token = torch.tensor([SOS_token], dtype=torch.long, device=device)
 
-        for _ in range(max_length):
-            output, hidden, cell = model.decoder(input_token, hidden, cell)
-            top1 = output.argmax(1)
-            token_id = top1.item()
+            decoded_tokens = []
 
-            if token_id == EOS_token:
-                break
+            for _ in range(max_length):
+                output, hidden, cell = model.decoder(input_token, hidden, cell)
+                top1 = output.argmax(1)
+                token_id = top1.item()
 
-            decoded_tokens.append(token_id)
-            input_token = top1
+                if token_id == EOS_token:
+                    break
+
+                decoded_tokens.append(token_id)
+                input_token = top1
 
     translated_words = [output_lang.index2word.get(idx, "<UNK>") for idx in decoded_tokens]
     return " ".join(translated_words)
 
 
 def main():
-    model, input_lang, output_lang, device = load_model()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Translate English -> French using a trained checkpoint.")
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Path to a checkpoint .pt file. Defaults to models/seq2seq_en_fr.pt",
+    )
+    args = parser.parse_args()
+
+    model, input_lang, output_lang, device = load_model(checkpoint_path=args.checkpoint)
 
     print("Enter an English sentence to translate (empty line to quit):")
     while True:

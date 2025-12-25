@@ -47,8 +47,17 @@ python train.py
 This will:
 
 - Load `data/eng_-french.csv`.
-- Train an encoder–decoder Seq2Seq model.
+- Train an encoder–decoder Seq2Seq model (by default: bidirectional encoder + attention).
+- Split data into train/validation and save the best checkpoint.
 - Save the checkpoint to `models/seq2seq_en_fr.pt`.
+
+Useful flags:
+
+```bash
+python train.py --epochs 20 --batch-size 64 --lr 3e-4
+python train.py --no-attention  # baseline without attention
+python train.py --val-split 0.1 --patience 3 --tf-start 1.0 --tf-end 0.2
+```
 
 You can optionally name the MLflow run:
 
@@ -62,6 +71,12 @@ Once the model is trained and the checkpoint exists in `models/seq2seq_en_fr.pt`
 
 ```bash
 python translate.py
+```
+
+Or use a specific checkpoint file:
+
+```bash
+python translate.py --checkpoint models/seq2seq_en_fr_last.pt
 ```
 
 Then type an English sentence, for example:
@@ -111,6 +126,20 @@ This project integrates MLflow to track experiments (hyperparameters, metrics, a
 
 Open the MLflow UI in your browser at `http://<host>:5000` to inspect runs, metrics, and artifacts.
 
+## 9. Compare two checkpoints
+
+1. Keep both checkpoints (rename the old one before retraining), e.g.:
+
+```bash
+mv models/seq2seq_en_fr.pt models/seq2seq_old.pt
+```
+
+2. Train the new model (it will write `models/seq2seq_en_fr.pt` again), then run:
+
+```bash
+python compare_models.py --ckpt-a models/seq2seq_old.pt --ckpt-b models/seq2seq_en_fr.pt --test-split 0.1 --seed 42
+```
+
 ## 8. Running in Google Colab
 
 In Colab, you can:
@@ -128,4 +157,3 @@ os.environ["MLFLOW_EXPERIMENT_NAME"] = "seq2seq_translation"
 ```
 
 Replace `<host>` with the public address or tunnel URL of your MLflow server.
-
