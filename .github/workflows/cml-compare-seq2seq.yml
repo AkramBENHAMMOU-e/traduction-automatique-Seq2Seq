@@ -1,0 +1,143 @@
+name: CML - Compare Seq2Seq Checkpoints
+
+on:
+  pull_request:
+    branches: ["main", "master"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies (minimal)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch numpy pandas
+
+      - name: Compare checkpoints (BLEU)
+        run: |
+          set -euo pipefail
+          CKPT_A="models/seq2seq_en_fr.pt"
+          CKPT_B="models/seq2seq_en_fr_without_att.pt"
+
+          if [ ! -f "${CKPT_A}" ]; then
+            echo "Missing checkpoint A: ${CKPT_A}" >&2
+            exit 1
+          fi
+          if [ ! -f "${CKPT_B}" ]; then
+            echo "Missing checkpoint B: ${CKPT_B}" >&2
+            exit 1
+          fi
+
+          ls -lh "${CKPT_A}" "${CKPT_B}" || true
+
+          echo "Comparing:" | tee compare_output.txt
+          echo "A: ${CKPT_A}" | tee -a compare_output.txt
+          echo "B: ${CKPT_B}" | tee -a compare_output.txt
+          echo "" | tee -a compare_output.txt
+
+          python compare_models.py \
+            --ckpt-a "${CKPT_A}" \
+            --ckpt-b "${CKPT_B}" \
+            --data "data/tatoeba/fra.txt" \
+            --limit 2000 \
+            --test-split 0.05 \
+            --seed 42 \
+            --max-length 30 \
+            | tee -a compare_output.txt
+
+      - name: Build CML report
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          text = Path('compare_output.txt').read_text(encoding='utf-8', errors='replace')
+
+          def extract_bleu(block_label: str):
+              pat = re.compile(
+                  rf"^{re.escape(block_label)}:\s*(?P<path>.+?)\s*$\n^\s+BLEU:\s*(?P<bleu>[0-9.]+)\s*\|\s*avg_hyp_len:\s*(?P<len>[0-9.]+)",
+                  re.M,
+              )
+              m = pat.search(text)
+              if not m:
+                  return None
+              return m.group('path').strip(), float(m.group('bleu')), float(m.group('len'))
+
+          a = extract_bleu('A')
+          b = extract_bleu('B')
+
+          lines = []
+          lines.append('# Seq2Seq checkpoint comparison')
+          lines.append('')
+          lines.append('This report compares two checkpoints on a small fixed subset for CI.')
+          lines.append('The evaluation uses greedy decoding and corpus BLEU from `compare_models.py`.')
+          lines.append('')
+
+          if a and b:
+              (path_a, bleu_a, len_a) = a
+              (path_b, bleu_b, len_b) = b
+              lines.append('## Summary')
+              lines.append('')
+              lines.append('| Model | Checkpoint | BLEU | Avg. hypothesis length |')
+              lines.append('|---|---|---:|---:|')
+              lines.append(f'| A | `{path_a}` | {bleu_a:.2f} | {len_a:.1f} |')
+              lines.append(f'| B | `{path_b}` | {bleu_b:.2f} | {len_b:.1f} |')
+              lines.append('')
+
+              if bleu_a > bleu_b:
+                  verdict = f'Checkpoint **A** has higher BLEU (+{(bleu_a - bleu_b):.2f}).'
+              elif bleu_b > bleu_a:
+                  verdict = f'Checkpoint **B** has higher BLEU (+{(bleu_b - bleu_a):.2f}).'
+              else:
+                  verdict = 'Both checkpoints have the same BLEU on this subset.'
+
+              lines.append('## Conclusion')
+              lines.append('')
+              lines.append(verdict)
+              lines.append('')
+
+          lines.append('## Raw output')
+          lines.append('')
+          lines.append('```')
+          lines.append(text.rstrip())
+          lines.append('```')
+
+          Path('cml_report.md').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+          print('Wrote cml_report.md')
+          PY
+
+      - name: Setup CML
+        if: github.event_name == 'pull_request'
+        uses: iterative/setup-cml@v2
+
+      - name: Publish report as PR comment
+        if: github.event_name == 'pull_request'
+        env:
+          REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cml comment create cml_report.md
+
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seq2seq-checkpoint-comparison
+          path: |
+            compare_output.txt
+            cml_report.md
