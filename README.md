@@ -18,23 +18,18 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-This installs PyTorch, pandas, Kaggle client, MLflow, etc.
+This installs PyTorch, pandas, MLflow, etc.
 
-## 4. Download the dataset (Kaggle)
+## 4. Download the dataset (Tatoeba / ManyThings)
 
-This project uses the Kaggle dataset  
-`devicharith/language-translation-englishfrench`.
-
-1. Go to Kaggle → Account → Create API Token.  
-2. Download `kaggle.json`.  
-3. Place `kaggle.json` in the project root (`traduction-automatique-Seq2Seq/`).
-4. Run:
+This project uses the English–French sentence pairs published via ManyThings (Tatoeba).
+Run:
 
 ```bash
 python download_data.py
 ```
 
-The CSV will be downloaded to `data/eng_-french.csv`.
+The dataset will be extracted to `data/tatoeba/fra.txt`.
 
 ## 5. Train the Seq2Seq model
 
@@ -46,7 +41,7 @@ python train.py
 
 This will:
 
-- Load `data/eng_-french.csv`.
+- Load `data/tatoeba/fra.txt`.
 - Train an encoder–decoder Seq2Seq model (by default: bidirectional encoder + attention).
 - Split data into train/validation and save the best checkpoint.
 - Save the checkpoint to `models/seq2seq_en_fr.pt`.
@@ -149,6 +144,7 @@ In Colab, you can:
 !git clone https://github.com/AkramBENHAMMOU-e/traduction-automatique-Seq2Seq
 %cd traduction-automatique-Seq2Seq
 !pip install -r requirements.txt
+!python download_data.py
 
 import os
 os.environ["MLFLOW_TRACKING_URI"] = "http://<host>:5000"  # optional

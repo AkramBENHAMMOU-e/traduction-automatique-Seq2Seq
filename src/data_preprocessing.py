@@ -38,24 +38,44 @@ def unicodeToAscii(s):
     )
 
 def normalizeString(s):
-    s = unicodeToAscii(s.lower().strip())
-    # Separate punctuation
-    s = re.sub(r"([.!?])", r" \1", s)
-    s = re.sub(r"[^a-zA-Z.!?]+", r" ", s)
-    return s.strip()
+    """
+    Text normalization aligned with references/notebook (1).py (Tatoeba/ManyThings).
+    - Lowercase + strip
+    - Unicode normalize (NFKD)
+    - Keep letters (incl. accented), digits, and basic punctuation
+    - Collapse whitespace
+    """
+    s = str(s).lower().strip()
+    s = unicodedata.normalize("NFKD", s)
+    s = re.sub(r"[^a-zA-Z0-9À-ÖØ-öø-ÿ'.,!?;:\-() ]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 def read_data(path, limit=None):
-    df = pd.read_csv(path)
-    if limit:
-        df = df.head(limit)
-    
-    # Rename columns for easier access if needed, but iloc is safer
     pairs = []
-    for i in range(len(df)):
-        eng = normalizeString(str(df.iloc[i, 0]))
-        fra = normalizeString(str(df.iloc[i, 1]))
-        pairs.append([eng, fra])
-    
+
+    if path.lower().endswith(".csv"):
+        df = pd.read_csv(path)
+        if limit is not None:
+            df = df.head(limit)
+
+        for i in range(len(df)):
+            eng = normalizeString(str(df.iloc[i, 0]))
+            fra = normalizeString(str(df.iloc[i, 1]))
+            pairs.append([eng, fra])
+        return pairs
+
+    # Tatoeba / ManyThings format: "English<TAB>French<TAB>metadata"
+    with open(path, "r", encoding="utf-8") as f:
+        for line_idx, line in enumerate(f):
+            if limit is not None and line_idx >= limit:
+                break
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 2:
+                continue
+            eng, fra = parts[0], parts[1]
+            pairs.append([normalizeString(eng), normalizeString(fra)])
+
     return pairs
 
 def filterPair(p, max_length=15):
@@ -120,4 +140,4 @@ def collate_fn(batch):
 
 if __name__ == '__main__':
     # Test
-    prepareData('data/eng_-french.csv', limit=100)
+    prepareData('data/tatoeba/fra.txt', limit=100)

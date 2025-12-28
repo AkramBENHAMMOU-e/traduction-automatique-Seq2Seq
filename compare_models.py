@@ -117,7 +117,7 @@ def main():
     parser = argparse.ArgumentParser(description="Compare two checkpoints on the same test split.")
     parser.add_argument("--ckpt-a", type=str, required=True)
     parser.add_argument("--ckpt-b", type=str, required=True)
-    parser.add_argument("--data", type=str, default="data/eng_-french.csv")
+    parser.add_argument("--data", type=str, default="data/tatoeba/fra.txt")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--test-split", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)

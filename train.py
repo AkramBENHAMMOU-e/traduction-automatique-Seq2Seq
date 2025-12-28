@@ -40,7 +40,7 @@ def _is_not_found_error(exc: Exception) -> bool:
     return "404" in text and "not found" in text.lower()
 
 
-DATA_PATH = "data/eng_-french.csv"
+DATA_PATH = "data/tatoeba/fra.txt"
 MODEL_DIR = "models"
 CHECKPOINT_NAME = "seq2seq_en_fr.pt"
 
@@ -257,7 +257,7 @@ def train(
         if not os.path.exists(DATA_PATH):
             raise FileNotFoundError(
                 f"Dataset not found at {DATA_PATH}. "
-                f"Place an English-French CSV there or run download_data.py first."
+                f"Run download_data.py first to download the Tatoeba (ManyThings) English-French dataset."
             )
 
         print(f"Loading and preparing data from {DATA_PATH} ...")
