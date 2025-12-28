@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Translator</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>AI Translator</h1>
+            <span class="badge">Seq2Seq</span>
+        </header>
+        
+        <div class="input-group">
+            <label for="sourceText">English</label>
+            <textarea id="sourceText" placeholder="Type something to translate..."></textarea>
+        </div>
+
+        <button id="translateBtn">
+            <span>Translate</span>
+            <div class="loader" id="loader"></div>
+        </button>
+
+        <div class="input-group">
+            <label for="targetText">French</label>
+            <div id="targetText" class="result-box" placeholder="Translation will appear here..."></div>
+        </div>
+
+        <footer>
+            <p id="status">Ready</p>
+        </footer>
+    </div>
+    <script src="popup.js"></script>
+</body>
+</html>
