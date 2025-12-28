@@ -57,6 +57,7 @@ Useful flags:
 python train.py --epochs 20 --batch-size 64 --lr 3e-4
 python train.py --no-attention  # baseline without attention
 python train.py --val-split 0.1 --patience 3 --tf-start 1.0 --tf-end 0.2
+python train.py --skip-training  # quick MLflow artifact upload check
 ```
 
 You can optionally name the MLflow run:

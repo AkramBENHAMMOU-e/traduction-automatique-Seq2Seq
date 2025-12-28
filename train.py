@@ -1,5 +1,6 @@
 import os
 import time
+import tempfile
 from contextlib import nullcontext
 
 import torch
@@ -19,6 +20,24 @@ try:
     import mlflow
 except ImportError:
     mlflow = None
+
+
+def _looks_like_local_path(value: str) -> bool:
+    value = value.strip()
+    if not value:
+        return False
+    if value.startswith("file:"):
+        return True
+    if value.startswith("/"):
+        return True
+    if len(value) >= 3 and value[1:3] == ":\\":  # Windows drive path
+        return True
+    return False
+
+
+def _is_not_found_error(exc: Exception) -> bool:
+    text = str(exc)
+    return "404" in text and "not found" in text.lower()
 
 
 DATA_PATH = "data/eng_-french.csv"
@@ -112,6 +131,7 @@ def train(
     use_attention=USE_ATTENTION,
     enc_bidirectional=ENC_BIDIRECTIONAL,
     seed=42,
+    skip_training=False,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(seed)
@@ -120,13 +140,40 @@ def train(
 
     run_ctx = nullcontext()
     use_mlflow = mlflow is not None
+    experiment_artifact_location = None
 
     if use_mlflow:
         tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
         if tracking_uri:
             mlflow.set_tracking_uri(tracking_uri)
 
-        mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
+        try:
+            experiment = mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
+        except Exception as exc:
+            message = str(exc).lower()
+            if "deleted experiment" in message:
+                raise RuntimeError(
+                    f"MLflow experiment '{MLFLOW_EXPERIMENT_NAME}' is deleted and cannot be set active. "
+                    "Pick a new MLFLOW_EXPERIMENT_NAME or restore the experiment in the MLflow UI."
+                ) from exc
+            raise
+
+        experiment_artifact_location = getattr(experiment, "artifact_location", None)
+        if experiment_artifact_location and _looks_like_local_path(experiment_artifact_location):
+            is_remote_tracking = bool(tracking_uri) and not _looks_like_local_path(tracking_uri)
+            message = (
+                "This MLflow experiment uses a local filesystem artifact location.\n"
+                f"Tracking URI: {mlflow.get_tracking_uri()}\n"
+                f"Experiment artifact location: {experiment_artifact_location}\n"
+                "For remote tracking servers, experiments must use an artifact URI that the server can handle "
+                "(typically `mlflow-artifacts:/...` when using `mlflow server --serve-artifacts ...`). "
+                "Existing experiments keep their original artifact location, so after fixing the server create a NEW "
+                "MLFLOW_EXPERIMENT_NAME."
+            )
+            if is_remote_tracking:
+                raise RuntimeError(message)
+            print(f"WARNING: {message}")
+
         effective_run_name = run_name or f"seq2seq_train_{int(time.time())}"
         run_ctx = mlflow.start_run(run_name=effective_run_name)
 
@@ -151,9 +198,61 @@ def train(
                     "use_attention": use_attention,
                     "enc_bidirectional": enc_bidirectional,
                     "seed": seed,
+                    "skip_training": skip_training,
                     "device": str(device),
                 }
             )
+
+        os.makedirs(MODEL_DIR, exist_ok=True)
+        best_checkpoint_path = os.path.join(MODEL_DIR, CHECKPOINT_NAME)
+        last_checkpoint_path = os.path.join(MODEL_DIR, "seq2seq_en_fr_last.pt")
+
+        if skip_training:
+            dummy_checkpoint = {
+                "dummy": True,
+                "created_at": int(time.time()),
+                "note": "Artifact upload smoke-check from train.py (--skip-training).",
+            }
+            torch.save(dummy_checkpoint, best_checkpoint_path)
+            torch.save(dummy_checkpoint, last_checkpoint_path)
+            print("Skip-training mode: created dummy checkpoints:")
+            print(f"- {best_checkpoint_path}")
+            print(f"- {last_checkpoint_path}")
+
+            if use_mlflow:
+                active = mlflow.active_run()
+                run_id = getattr(getattr(active, "info", None), "run_id", None)
+                run_artifact_uri = getattr(getattr(active, "info", None), "artifact_uri", None)
+
+                for local_path in (best_checkpoint_path, last_checkpoint_path):
+                    try:
+                        mlflow.log_artifact(local_path, artifact_path="models")
+                    except Exception as exc:
+                        print("ERROR: Failed to log artifact to MLflow.")
+                        print(f"Tracking URI: {mlflow.get_tracking_uri()}")
+                        if experiment_artifact_location:
+                            print(f"Experiment artifact location: {experiment_artifact_location}")
+                        if run_artifact_uri:
+                            print(f"Run artifact URI: {run_artifact_uri}")
+                        print(f"Local artifact path: {local_path}")
+                        raise
+
+                try:
+                    from mlflow.tracking import MlflowClient
+                except Exception:
+                    MlflowClient = None
+
+                if MlflowClient is not None and run_id is not None:
+                    client = MlflowClient(tracking_uri=mlflow.get_tracking_uri())
+                    for rel_path in (
+                        f"models/{os.path.basename(best_checkpoint_path)}",
+                        f"models/{os.path.basename(last_checkpoint_path)}",
+                    ):
+                        with tempfile.TemporaryDirectory() as tmpdir:
+                            client.download_artifacts(run_id, rel_path, dst_path=tmpdir)
+
+                print("OK: MLflow received model artifacts in skip-training mode.")
+            return
 
         if not os.path.exists(DATA_PATH):
             raise FileNotFoundError(
@@ -260,10 +359,6 @@ def train(
         global_step = 0
         best_metric = float("inf")
         epochs_no_improve = 0
-
-        os.makedirs(MODEL_DIR, exist_ok=True)
-        best_checkpoint_path = os.path.join(MODEL_DIR, CHECKPOINT_NAME)
-        last_checkpoint_path = os.path.join(MODEL_DIR, "seq2seq_en_fr_last.pt")
 
         for epoch in range(1, n_epochs + 1):
             model.train()
@@ -398,9 +493,83 @@ def train(
             print(f"Best checkpoint saved to {best_checkpoint_path}")
 
         if use_mlflow:
+            active = mlflow.active_run()
+            run_id = getattr(getattr(active, "info", None), "run_id", None)
+            run_artifact_uri = getattr(getattr(active, "info", None), "artifact_uri", None)
+
+            to_log = []
             if os.path.exists(best_checkpoint_path):
-                mlflow.log_artifact(best_checkpoint_path, artifact_path="models")
-            mlflow.log_artifact(last_checkpoint_path, artifact_path="models")
+                to_log.append(best_checkpoint_path)
+            to_log.append(last_checkpoint_path)
+
+            for local_path in to_log:
+                try:
+                    mlflow.log_artifact(local_path, artifact_path="models")
+                except PermissionError as exc:
+                    print("ERROR: Failed to write artifact due to a permissions error.")
+                    print(f"Tracking URI: {mlflow.get_tracking_uri()}")
+                    if experiment_artifact_location:
+                        print(f"Experiment artifact location: {experiment_artifact_location}")
+                    if run_artifact_uri:
+                        print(f"Run artifact URI: {run_artifact_uri}")
+                    print(f"Local artifact path: {local_path}")
+                    print(f"Original error: {exc}")
+                    print(
+                        "Hint: Your MLflow server likely created the experiment with a local filesystem artifact root "
+                        "(e.g. 'file:/mlruns'). In that mode, the *client* writes artifacts directly to that path. "
+                        "For a remote MLflow server, configure an artifact store the client can access (S3/MinIO/NFS), "
+                        "or start the server with artifact serving (MLflow: `mlflow server --serve-artifacts ...`)."
+                    )
+                    raise
+                except Exception as exc:
+                    print("ERROR: Failed to log artifact to MLflow.")
+                    print(f"Tracking URI: {mlflow.get_tracking_uri()}")
+                    if experiment_artifact_location:
+                        print(f"Experiment artifact location: {experiment_artifact_location}")
+                    if run_artifact_uri:
+                        print(f"Run artifact URI: {run_artifact_uri}")
+                    print(f"Local artifact path: {local_path}")
+                    print(f"Original error: {exc}")
+                    raise
+
+            try:
+                from mlflow.tracking import MlflowClient
+            except Exception:
+                MlflowClient = None
+
+            if MlflowClient is not None and run_id is not None:
+                client = MlflowClient(tracking_uri=mlflow.get_tracking_uri())
+                run_artifact_uri = run_artifact_uri or getattr(getattr(mlflow.active_run(), "info", None), "artifact_uri", None)
+
+                expected = []
+                if os.path.exists(best_checkpoint_path):
+                    expected.append(f"models/{os.path.basename(best_checkpoint_path)}")
+                expected.append(f"models/{os.path.basename(last_checkpoint_path)}")
+
+                for rel_path in expected:
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        try:
+                            client.download_artifacts(run_id, rel_path, dst_path=tmpdir)
+                        except Exception as exc:
+                            print("ERROR: Model artifact upload may have failed (could not download it back).")
+                            print(f"Run ID: {run_id}")
+                            print(f"Expected artifact path: {rel_path}")
+                            print(f"Run artifact URI: {run_artifact_uri}")
+                            if experiment_artifact_location:
+                                print(f"Experiment artifact location: {experiment_artifact_location}")
+                            print(f"Original error: {exc}")
+                            print(
+                                "Hint: Run `python3 test_mlflow_artifact.py` to diagnose your MLflow artifact "
+                                "configuration (remote servers often need `--serve-artifacts` or a shared artifact store)."
+                            )
+                            break
+
+                try:
+                    client.list_artifacts(run_id, path="models")
+                except Exception as exc:
+                    if not _is_not_found_error(exc):
+                        print("WARNING: Could not list artifacts (non-fatal).")
+                        print(f"Original error: {exc}")
 
 
 if __name__ == "__main__":
@@ -428,6 +597,11 @@ if __name__ == "__main__":
     parser.add_argument("--no-attention", action="store_true")
     parser.add_argument("--no-bidir", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--skip-training",
+        action="store_true",
+        help="Skip the training loop and only create/log dummy .pt artifacts to validate MLflow artifact upload.",
+    )
     cli_args = parser.parse_args()
 
     train(
@@ -447,4 +621,5 @@ if __name__ == "__main__":
         use_attention=not cli_args.no_attention,
         enc_bidirectional=not cli_args.no_bidir,
         seed=cli_args.seed,
+        skip_training=cli_args.skip_training,
     )
