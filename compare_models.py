@@ -3,7 +3,7 @@ import math
 
 import torch
 
-from src.data_preprocessing import prepareData
+from src.data_preprocessing import prepareData, load_parallel_pairs
 from translate import load_model
 
 
@@ -119,15 +119,40 @@ def main():
     parser.add_argument("--ckpt-a", type=str, required=True)
     parser.add_argument("--ckpt-b", type=str, required=True)
     parser.add_argument("--data", type=str, default="data/tatoeba/fra.txt")
+    parser.add_argument("--test-src", type=str, default=None, help="Optional test source file (one sentence per line).")
+    parser.add_argument("--test-tgt", type=str, default=None, help="Optional test target file (one sentence per line).")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--test-split", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-length", type=int, default=30)
+    parser.add_argument(
+        "--pair-max-length",
+        type=int,
+        default=15,
+        help="Max tokens per sentence when loading pairs (after normalization).",
+    )
     parser.add_argument("--norm", type=str, default="v2", choices=["v1", "v2"])
     args = parser.parse_args()
 
-    _, _, pairs = prepareData(args.data, limit=args.limit, normalization=args.norm)
-    test_pairs = split_pairs(pairs, test_split=args.test_split, seed=args.seed)
+    if (args.test_src is None) != (args.test_tgt is None):
+        raise ValueError("Provide both --test-src and --test-tgt (or neither).")
+
+    if args.test_src and args.test_tgt:
+        test_pairs = load_parallel_pairs(
+            args.test_src,
+            args.test_tgt,
+            limit=args.limit,
+            max_length=args.pair_max_length,
+            normalization=args.norm,
+        )
+    else:
+        _, _, pairs = prepareData(
+            args.data,
+            limit=args.limit,
+            max_length=args.pair_max_length,
+            normalization=args.norm,
+        )
+        test_pairs = split_pairs(pairs, test_split=args.test_split, seed=args.seed)
     print(f"Test samples: {len(test_pairs)}")
 
     bleu_a, len_a = score_checkpoint(args.ckpt_a, test_pairs, max_length=args.max_length)

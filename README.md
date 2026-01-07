@@ -31,6 +31,20 @@ python download_data.py
 
 The dataset will be extracted to `data/tatoeba/fra.txt`.
 
+### Optional (recommended): create fixed train/val/test files
+
+This mirrors the `seq2seq-attn-ref` style dataset structure (one sentence per line, separate files per split).
+
+```bash
+python prepare_splits.py --data data/tatoeba/fra.txt --out-dir data/splits --norm v2 --max-length 15 --seed 42 --val-split 0.1 --test-split 0.1
+```
+
+This writes:
+
+- `data/splits/train.en`, `data/splits/train.fr`
+- `data/splits/val.en`, `data/splits/val.fr`
+- `data/splits/test.en`, `data/splits/test.fr`
+
 ## 5. Train the Seq2Seq model
 
 Basic training (CPU or GPU if available):
@@ -53,6 +67,7 @@ python train.py --epochs 20 --batch-size 64 --lr 3e-4
 python train.py --no-attention  # baseline without attention
 python train.py --val-split 0.1 --patience 3 --tf-start 1.0 --tf-end 0.2
 python train.py --input-vocab-size 15000 --output-vocab-size 20000 --min-word-freq 2 --norm v2
+python train.py --train-src data/splits/train.en --train-tgt data/splits/train.fr --val-src data/splits/val.en --val-tgt data/splits/val.fr
 python train.py --skip-training  # quick MLflow artifact upload check
 ```
 
@@ -141,6 +156,12 @@ mv models/seq2seq_en_fr.pt models/seq2seq_old.pt
 
 ```bash
 python compare_models.py --ckpt-a models/seq2seq_old.pt --ckpt-b models/seq2seq_en_fr.pt --test-split 0.1 --seed 42
+```
+
+If you created fixed split files:
+
+```bash
+python compare_models.py --ckpt-a models/seq2seq_old.pt --ckpt-b models/seq2seq_en_fr.pt --test-src data/splits/test.en --test-tgt data/splits/test.fr --norm v2
 ```
 
 ## 8. Running in Google Colab

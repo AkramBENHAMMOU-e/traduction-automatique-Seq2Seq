@@ -214,7 +214,11 @@ def train(
         if use_mlflow:
             mlflow.log_params(
                 {
-                    "data_path": DATA_PATH,
+                    "data_path": data_path,
+                    "train_src": train_src or "",
+                    "train_tgt": train_tgt or "",
+                    "val_src": val_src or "",
+                    "val_tgt": val_tgt or "",
                     "embedding_dim": embedding_dim,
                     "hidden_size": hidden_size,
                     "num_layers": num_layers,
@@ -227,8 +231,8 @@ def train(
                     "grad_clip": grad_clip,
                     "label_smoothing": label_smoothing,
                     "max_length": max_length,
-                    "input_vocab_size": input_vocab_size,
-                    "output_vocab_size": output_vocab_size,
+                    "input_vocab_size_limit": input_vocab_size,
+                    "output_vocab_size_limit": output_vocab_size,
                     "min_word_freq": min_word_freq,
                     "text_normalization": text_normalization,
                     "val_split": val_split,
@@ -292,42 +296,95 @@ def train(
                 print("OK: MLflow received model artifacts in skip-training mode.")
             return
 
-        if not os.path.exists(DATA_PATH):
-            raise FileNotFoundError(
-                f"Dataset not found at {DATA_PATH}. "
-                f"Run download_data.py first to download the Tatoeba (ManyThings) English-French dataset."
+        if (train_src is None) != (train_tgt is None):
+            raise ValueError("Provide both train_src and train_tgt (or neither).")
+        if (val_src is None) != (val_tgt is None):
+            raise ValueError("Provide both val_src and val_tgt (or neither).")
+
+        vocab_limit_src = None if (not input_vocab_size or input_vocab_size <= 0) else int(input_vocab_size)
+        vocab_limit_tgt = None if (not output_vocab_size or output_vocab_size <= 0) else int(output_vocab_size)
+        min_word_freq = max(1, int(min_word_freq))
+        normalization = str(text_normalization)
+
+        if train_src and train_tgt:
+            if not os.path.exists(train_src):
+                raise FileNotFoundError(f"Training source file not found: {train_src}")
+            if not os.path.exists(train_tgt):
+                raise FileNotFoundError(f"Training target file not found: {train_tgt}")
+
+            print(f"Loading training data from {train_src} / {train_tgt} ...")
+            train_pairs = load_parallel_pairs(
+                train_src,
+                train_tgt,
+                limit=limit_pairs,
+                max_length=max_length,
+                normalization=normalization,
             )
 
-        print(f"Loading and preparing data from {DATA_PATH} ...")
-        input_lang, output_lang, pairs = prepareData(
-            DATA_PATH,
-            limit=None,
-            max_length=max_length,
-            input_vocab_size=None if (not input_vocab_size or input_vocab_size <= 0) else input_vocab_size,
-            output_vocab_size=None if (not output_vocab_size or output_vocab_size <= 0) else output_vocab_size,
-            min_word_freq=max(1, int(min_word_freq)),
-            normalization=str(text_normalization),
+            if val_src and val_tgt:
+                if not os.path.exists(val_src):
+                    raise FileNotFoundError(f"Validation source file not found: {val_src}")
+                if not os.path.exists(val_tgt):
+                    raise FileNotFoundError(f"Validation target file not found: {val_tgt}")
+                print(f"Loading validation data from {val_src} / {val_tgt} ...")
+                val_pairs = load_parallel_pairs(
+                    val_src,
+                    val_tgt,
+                    limit=limit_pairs,
+                    max_length=max_length,
+                    normalization=normalization,
+                )
+            else:
+                train_pairs, val_pairs = _split_pairs(train_pairs, val_split=val_split, seed=seed)
+        else:
+            if not os.path.exists(data_path):
+                raise FileNotFoundError(
+                    f"Dataset not found at {data_path}. "
+                    "Run download_data.py first to download the Tatoeba (ManyThings) English-French dataset."
+                )
+            print(f"Loading and preparing data from {data_path} ...")
+            all_pairs = load_pairs(
+                data_path,
+                limit=limit_pairs,
+                max_length=max_length,
+                normalization=normalization,
+            )
+            train_pairs, val_pairs = _split_pairs(all_pairs, val_split=val_split, seed=seed)
+
+        if not train_pairs:
+            raise RuntimeError(
+                "No training pairs after filtering. Try increasing --max-length, switching --norm, or removing --limit."
+            )
+
+        input_lang, output_lang = build_langs(
+            train_pairs,
+            input_vocab_size=vocab_limit_src,
+            output_vocab_size=vocab_limit_tgt,
+            min_word_freq=min_word_freq,
+            input_name="eng",
+            output_name="fra",
         )
-        print(f"Number of sentence pairs: {len(pairs)}")
+
+        print(f"Train pairs: {len(train_pairs)}, Val pairs: {len(val_pairs)}")
         print(f"Input vocab size: {input_lang.n_words}, Output vocab size: {output_lang.n_words}")
 
         if use_mlflow:
             mlflow.log_params(
                 {
+                    "train_pairs": len(train_pairs),
+                    "val_pairs": len(val_pairs),
                     "input_vocab_size": input_lang.n_words,
                     "output_vocab_size": output_lang.n_words,
-                    "num_sentence_pairs": len(pairs),
                 }
             )
 
-        if not (0.0 <= val_split < 1.0):
-            raise ValueError("val_split must be in [0.0, 1.0).")
-
-        dataset = TranslationDataset(pairs, input_lang, output_lang)
-        val_size = int(len(dataset) * val_split)
-        train_size = len(dataset) - val_size
-        split_gen = torch.Generator().manual_seed(seed)
-        train_dataset, val_dataset = random_split(dataset, [train_size, val_size], generator=split_gen)
+        train_dataset = TranslationDataset(train_pairs, input_lang, output_lang)
+        train_size = len(train_dataset)
+        val_dataset = None
+        val_size = 0
+        if val_pairs:
+            val_dataset = TranslationDataset(val_pairs, input_lang, output_lang)
+            val_size = len(val_dataset)
 
         use_cuda = device.type == "cuda"
         num_workers = min(4, os.cpu_count() or 0)
@@ -343,7 +400,7 @@ def train(
             persistent_workers=num_workers > 0,
         )
         val_loader = None
-        if val_size > 0:
+        if val_dataset is not None:
             val_loader = DataLoader(
                 val_dataset,
                 batch_size=batch_size,
@@ -633,6 +690,24 @@ if __name__ == "__main__":
         default=None,
         help="Optional MLflow run name. If not set, a timestamp-based name is used.",
     )
+    parser.add_argument(
+        "--data",
+        type=str,
+        default=DATA_PATH,
+        help="TSV/CSV dataset path (ignored if --train-src/--train-tgt are provided).",
+    )
+    parser.add_argument("--train-src", type=str, default=None, help="Training source file (one sentence per line).")
+    parser.add_argument("--train-tgt", type=str, default=None, help="Training target file (one sentence per line).")
+    parser.add_argument("--val-src", type=str, default=None, help="Validation source file (one sentence per line).")
+    parser.add_argument("--val-tgt", type=str, default=None, help="Validation target file (one sentence per line).")
+    parser.add_argument(
+        "--limit",
+        "--limit-pairs",
+        dest="limit_pairs",
+        type=int,
+        default=None,
+        help="Optional cap on number of pairs loaded (debug).",
+    )
     parser.add_argument("--epochs", type=int, default=N_EPOCHS)
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--lr", type=float, default=LEARNING_RATE)
@@ -662,6 +737,12 @@ if __name__ == "__main__":
 
     train(
         run_name=cli_args.run_name,
+        data_path=cli_args.data,
+        train_src=cli_args.train_src,
+        train_tgt=cli_args.train_tgt,
+        val_src=cli_args.val_src,
+        val_tgt=cli_args.val_tgt,
+        limit_pairs=cli_args.limit_pairs,
         n_epochs=cli_args.epochs,
         batch_size=cli_args.batch_size,
         learning_rate=cli_args.lr,
