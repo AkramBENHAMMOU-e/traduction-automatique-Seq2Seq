@@ -4,6 +4,7 @@ import torch
 
 from src.data_preprocessing import (
     normalizeString,
+    normalizeString_v2,
     tensorFromSentence,
     SOS_token,
     EOS_token,
@@ -84,53 +85,132 @@ def load_model(checkpoint_path=None, device=None):
     else:
         model = Seq2Seq(encoder, decoder, device).to(device)
     model.eval()
+    model.text_normalization = str(config.get("text_normalization", "v1"))
 
     return model, input_lang, output_lang, device
 
 
 def translate_sentence(sentence, model, input_lang, output_lang, device, max_length=30):
+    return translate_sentence_beam(
+        sentence,
+        model,
+        input_lang,
+        output_lang,
+        device,
+        max_length=max_length,
+        beam_size=1,
+        length_penalty=0.0,
+    )
+
+
+def _length_penalized_score(log_prob, length, alpha):
+    if alpha <= 0:
+        return log_prob
+    length = max(1, length)
+    return log_prob / (float(length) ** float(alpha))
+
+
+@torch.no_grad()
+def translate_sentence_beam(
+    sentence,
+    model,
+    input_lang,
+    output_lang,
+    device,
+    max_length=30,
+    beam_size=5,
+    length_penalty=0.6,
+):
     model.eval()
 
-    normalized = normalizeString(sentence)
+    normalizer = normalizeString_v2 if getattr(model, "text_normalization", "v1") == "v2" else normalizeString
+    normalized = normalizer(sentence)
     src_tensor = tensorFromSentence(input_lang, normalized).to(device)
-
     src_length = [src_tensor.size(0)]
     src_tensor = src_tensor.unsqueeze(1)  # (seq_len, 1)
 
-    with torch.no_grad():
-        if isinstance(model, Seq2SeqAttn):
-            encoder_outputs, enc_state = model.encoder(src_tensor, src_length)
-            hidden, cell = model._init_dec_state(enc_state)
-            input_token = torch.tensor([SOS_token], dtype=torch.long, device=device)
+    if beam_size <= 1:
+        beam_size = 1
 
-            decoded_tokens = []
-            for _ in range(max_length):
-                output, hidden, cell = model.decoder(
-                    input_token, hidden, cell, encoder_outputs, src_length
+    if isinstance(model, Seq2SeqAttn):
+        encoder_outputs, enc_state = model.encoder(src_tensor, src_length)
+        hidden, cell = model._init_dec_state(enc_state)
+
+        beams = [([SOS_token], 0.0, hidden, cell, None, False)]
+
+        for _ in range(max_length):
+            candidates = []
+            for tokens, score, hidden, cell, context, ended in beams:
+                if ended:
+                    candidates.append((tokens, score, hidden, cell, context, ended))
+                    continue
+
+                input_token = torch.tensor([tokens[-1]], dtype=torch.long, device=device)
+                logits, next_hidden, next_cell, next_context = model.decoder(
+                    input_token, hidden, cell, encoder_outputs, src_length, context
                 )
-                top1 = output.argmax(1)
-                token_id = top1.item()
-                if token_id == EOS_token:
-                    break
-                decoded_tokens.append(token_id)
-                input_token = top1
-        else:
-            _, (hidden, cell) = model.encoder(src_tensor, src_length)
+                log_probs = torch.log_softmax(logits, dim=1)  # (1, vocab)
+                top_log_probs, top_ids = log_probs.topk(beam_size, dim=1)
 
-            input_token = torch.tensor([SOS_token], dtype=torch.long, device=device)
+                for lp, idx in zip(top_log_probs.squeeze(0).tolist(), top_ids.squeeze(0).tolist()):
+                    new_tokens = tokens + [idx]
+                    new_score = score + float(lp)
+                    new_ended = idx == EOS_token
+                    candidates.append(
+                        (new_tokens, new_score, next_hidden, next_cell, next_context, new_ended)
+                    )
 
-            decoded_tokens = []
+            beams = sorted(
+                candidates,
+                key=lambda b: _length_penalized_score(b[1], len(b[0]) - 1, length_penalty),
+                reverse=True,
+            )[:beam_size]
 
-            for _ in range(max_length):
-                output, hidden, cell = model.decoder(input_token, hidden, cell)
-                top1 = output.argmax(1)
-                token_id = top1.item()
+            if all(ended for *_, ended in beams):
+                break
 
-                if token_id == EOS_token:
-                    break
+        best_tokens = max(
+            beams,
+            key=lambda b: _length_penalized_score(b[1], len(b[0]) - 1, length_penalty),
+        )[0]
+        decoded_tokens = [t for t in best_tokens[1:] if t != EOS_token]
+    else:
+        _, (hidden, cell) = model.encoder(src_tensor, src_length)
 
-                decoded_tokens.append(token_id)
-                input_token = top1
+        beams = [([SOS_token], 0.0, hidden, cell, False)]
+
+        for _ in range(max_length):
+            candidates = []
+            for tokens, score, hidden, cell, ended in beams:
+                if ended:
+                    candidates.append((tokens, score, hidden, cell, ended))
+                    continue
+
+                input_token = torch.tensor([tokens[-1]], dtype=torch.long, device=device)
+                logits, next_hidden, next_cell = model.decoder(input_token, hidden, cell)
+                log_probs = torch.log_softmax(logits, dim=1)
+                top_log_probs, top_ids = log_probs.topk(beam_size, dim=1)
+
+                for lp, idx in zip(top_log_probs.squeeze(0).tolist(), top_ids.squeeze(0).tolist()):
+                    new_tokens = tokens + [idx]
+                    new_score = score + float(lp)
+                    new_ended = idx == EOS_token
+                    candidates.append((new_tokens, new_score, next_hidden, next_cell, new_ended))
+
+            beams = sorted(
+                candidates,
+                key=lambda b: _length_penalized_score(b[1], len(b[0]) - 1, length_penalty),
+                reverse=True,
+            )[:beam_size]
+
+            if all(ended for *_, ended in beams):
+                break
+
+        best_tokens = max(
+            beams,
+            key=lambda b: _length_penalized_score(b[1], len(b[0]) - 1, length_penalty),
+        )[0]
+        decoded_tokens = [t for t in best_tokens[1:] if t != EOS_token]
 
     translated_words = [output_lang.index2word.get(idx, "<UNK>") for idx in decoded_tokens]
     return " ".join(translated_words)
@@ -146,6 +226,14 @@ def main():
         default=None,
         help="Path to a checkpoint .pt file. Defaults to models/seq2seq_en_fr.pt",
     )
+    parser.add_argument("--max-length", type=int, default=30, help="Maximum decoded length (tokens).")
+    parser.add_argument("--beam-size", type=int, default=5, help="Beam size; use 1 for greedy decoding.")
+    parser.add_argument(
+        "--length-penalty",
+        type=float,
+        default=0.6,
+        help="Length penalty alpha (0 disables). Higher discourages short outputs.",
+    )
     args = parser.parse_args()
 
     model, input_lang, output_lang, device = load_model(checkpoint_path=args.checkpoint)
@@ -156,7 +244,16 @@ def main():
         if not sentence:
             break
 
-        translation = translate_sentence(sentence, model, input_lang, output_lang, device)
+        translation = translate_sentence_beam(
+            sentence,
+            model,
+            input_lang,
+            output_lang,
+            device,
+            max_length=args.max_length,
+            beam_size=args.beam_size,
+            length_penalty=args.length_penalty,
+        )
         print(f"French: {translation}")
 
 

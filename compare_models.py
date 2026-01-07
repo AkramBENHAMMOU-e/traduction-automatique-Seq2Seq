@@ -3,7 +3,7 @@ import math
 
 import torch
 
-from src.data_preprocessing import prepareData, normalizeString
+from src.data_preprocessing import prepareData
 from translate import load_model
 
 
@@ -54,7 +54,7 @@ def greedy_translate(sentence, model, input_lang, output_lang, device, max_lengt
     from src.data_preprocessing import tensorFromSentence, SOS_token, EOS_token
 
     model.eval()
-    src_tensor = tensorFromSentence(input_lang, normalizeString(sentence)).to(device)
+    src_tensor = tensorFromSentence(input_lang, sentence).to(device)
     src_length = [src_tensor.size(0)]
     src_tensor = src_tensor.unsqueeze(1)  # (src_len, 1)
 
@@ -62,10 +62,11 @@ def greedy_translate(sentence, model, input_lang, output_lang, device, max_lengt
         encoder_outputs, enc_state = model.encoder(src_tensor, src_length)
         hidden, cell = model._init_dec_state(enc_state)
         input_token = torch.tensor([SOS_token], dtype=torch.long, device=device)
+        context = None
         decoded = []
         for _ in range(max_length):
-            logits, hidden, cell = model.decoder(
-                input_token, hidden, cell, encoder_outputs, src_length
+            logits, hidden, cell, context = model.decoder(
+                input_token, hidden, cell, encoder_outputs, src_length, context
             )
             top1 = logits.argmax(1)
             token_id = top1.item()
@@ -122,9 +123,10 @@ def main():
     parser.add_argument("--test-split", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-length", type=int, default=30)
+    parser.add_argument("--norm", type=str, default="v2", choices=["v1", "v2"])
     args = parser.parse_args()
 
-    _, _, pairs = prepareData(args.data, limit=args.limit)
+    _, _, pairs = prepareData(args.data, limit=args.limit, normalization=args.norm)
     test_pairs = split_pairs(pairs, test_split=args.test_split, seed=args.seed)
     print(f"Test samples: {len(test_pairs)}")
 

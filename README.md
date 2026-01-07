@@ -52,6 +52,7 @@ Useful flags:
 python train.py --epochs 20 --batch-size 64 --lr 3e-4
 python train.py --no-attention  # baseline without attention
 python train.py --val-split 0.1 --patience 3 --tf-start 1.0 --tf-end 0.2
+python train.py --input-vocab-size 15000 --output-vocab-size 20000 --min-word-freq 2 --norm v2
 python train.py --skip-training  # quick MLflow artifact upload check
 ```
 
@@ -83,6 +84,12 @@ French: je suis heureux aujourd hui .
 ```
 
 Press Enter on an empty line to quit.
+
+Beam search options (usually improves output quality):
+
+```bash
+python translate.py --beam-size 5 --length-penalty 0.6 --max-length 30
+```
 
 ## 7. MLflow tracking (optional)
 

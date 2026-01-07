@@ -6,13 +6,15 @@ from contextlib import nullcontext
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 
 from src.data_preprocessing import (
-    prepareData,
     TranslationDataset,
     collate_fn,
     PAD_token,
+    build_langs,
+    load_pairs,
+    load_parallel_pairs,
 )
 from src.models import EncoderRNN, DecoderRNN, Seq2Seq, AttnDecoderRNN, Seq2SeqAttn
 
@@ -50,12 +52,17 @@ NUM_LAYERS = 1
 DROPOUT = 0.1
 
 BATCH_SIZE = 32
-N_EPOCHS = 5
+N_EPOCHS = 10
 LEARNING_RATE = 1e-3
 TEACHER_FORCING_START = 1.0
 TEACHER_FORCING_END = 0.2
 GRAD_CLIP = 1.0
 LABEL_SMOOTHING = 0.1
+MAX_LENGTH = 15
+INPUT_VOCAB_SIZE = 15000
+OUTPUT_VOCAB_SIZE = 20000
+MIN_WORD_FREQ = 2
+TEXT_NORMALIZATION = "v2"
 VAL_SPLIT = 0.1
 EARLY_STOPPING_PATIENCE = 3
 USE_ATTENTION = True
@@ -72,6 +79,21 @@ def _teacher_forcing_ratio(epoch_idx, n_epochs, start, end):
         return float(end)
     progress = (epoch_idx - 1) / (n_epochs - 1)
     return float(start + (end - start) * progress)
+
+
+def _split_pairs(pairs, val_split, seed):
+    if not pairs or val_split <= 0:
+        return pairs, []
+    if not (0.0 <= val_split < 1.0):
+        raise ValueError("val_split must be in [0.0, 1.0).")
+    g = torch.Generator().manual_seed(seed)
+    idx = torch.randperm(len(pairs), generator=g).tolist()
+    val_size = int(len(pairs) * val_split)
+    val_idx = idx[:val_size]
+    train_idx = idx[val_size:]
+    train_pairs = [pairs[i] for i in train_idx]
+    val_pairs = [pairs[i] for i in val_idx]
+    return train_pairs, val_pairs
 
 
 @torch.no_grad()
@@ -115,6 +137,12 @@ def evaluate(model, dataloader, criterion, device, use_amp=False):
 
 def train(
     run_name=None,
+    data_path=DATA_PATH,
+    train_src=None,
+    train_tgt=None,
+    val_src=None,
+    val_tgt=None,
+    limit_pairs=None,
     n_epochs=N_EPOCHS,
     batch_size=BATCH_SIZE,
     learning_rate=LEARNING_RATE,
@@ -123,6 +151,11 @@ def train(
     num_layers=NUM_LAYERS,
     dropout=DROPOUT,
     label_smoothing=LABEL_SMOOTHING,
+    max_length=MAX_LENGTH,
+    input_vocab_size=INPUT_VOCAB_SIZE,
+    output_vocab_size=OUTPUT_VOCAB_SIZE,
+    min_word_freq=MIN_WORD_FREQ,
+    text_normalization=TEXT_NORMALIZATION,
     val_split=VAL_SPLIT,
     early_stopping_patience=EARLY_STOPPING_PATIENCE,
     teacher_forcing_start=TEACHER_FORCING_START,
@@ -193,6 +226,11 @@ def train(
                     "teacher_forcing_end": teacher_forcing_end,
                     "grad_clip": grad_clip,
                     "label_smoothing": label_smoothing,
+                    "max_length": max_length,
+                    "input_vocab_size": input_vocab_size,
+                    "output_vocab_size": output_vocab_size,
+                    "min_word_freq": min_word_freq,
+                    "text_normalization": text_normalization,
                     "val_split": val_split,
                     "early_stopping_patience": early_stopping_patience,
                     "use_attention": use_attention,
@@ -261,7 +299,15 @@ def train(
             )
 
         print(f"Loading and preparing data from {DATA_PATH} ...")
-        input_lang, output_lang, pairs = prepareData(DATA_PATH, limit=None)
+        input_lang, output_lang, pairs = prepareData(
+            DATA_PATH,
+            limit=None,
+            max_length=max_length,
+            input_vocab_size=None if (not input_vocab_size or input_vocab_size <= 0) else input_vocab_size,
+            output_vocab_size=None if (not output_vocab_size or output_vocab_size <= 0) else output_vocab_size,
+            min_word_freq=max(1, int(min_word_freq)),
+            normalization=str(text_normalization),
+        )
         print(f"Number of sentence pairs: {len(pairs)}")
         print(f"Input vocab size: {input_lang.n_words}, Output vocab size: {output_lang.n_words}")
 
@@ -464,6 +510,11 @@ def train(
                     "dropout": dropout,
                     "use_attention": use_attention,
                     "enc_bidirectional": enc_bidirectional if use_attention else False,
+                    "max_length": max_length,
+                    "input_vocab_size": input_vocab_size,
+                    "output_vocab_size": output_vocab_size,
+                    "min_word_freq": min_word_freq,
+                    "text_normalization": text_normalization,
                 },
                 "train_state": {
                     "epoch": epoch,
@@ -590,6 +641,11 @@ if __name__ == "__main__":
     parser.add_argument("--num-layers", type=int, default=NUM_LAYERS)
     parser.add_argument("--dropout", type=float, default=DROPOUT)
     parser.add_argument("--label-smoothing", type=float, default=LABEL_SMOOTHING)
+    parser.add_argument("--max-length", type=int, default=MAX_LENGTH)
+    parser.add_argument("--input-vocab-size", type=int, default=INPUT_VOCAB_SIZE)
+    parser.add_argument("--output-vocab-size", type=int, default=OUTPUT_VOCAB_SIZE)
+    parser.add_argument("--min-word-freq", type=int, default=MIN_WORD_FREQ)
+    parser.add_argument("--norm", type=str, default=TEXT_NORMALIZATION, choices=["v1", "v2"])
     parser.add_argument("--val-split", type=float, default=VAL_SPLIT)
     parser.add_argument("--patience", type=int, default=EARLY_STOPPING_PATIENCE)
     parser.add_argument("--tf-start", type=float, default=TEACHER_FORCING_START)
@@ -614,6 +670,11 @@ if __name__ == "__main__":
         num_layers=cli_args.num_layers,
         dropout=cli_args.dropout,
         label_smoothing=cli_args.label_smoothing,
+        max_length=cli_args.max_length,
+        input_vocab_size=cli_args.input_vocab_size,
+        output_vocab_size=cli_args.output_vocab_size,
+        min_word_freq=cli_args.min_word_freq,
+        text_normalization=cli_args.norm,
         val_split=cli_args.val_split,
         early_stopping_patience=cli_args.patience,
         teacher_forcing_start=cli_args.tf_start,

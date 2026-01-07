@@ -128,27 +128,29 @@ class AttnDecoderRNN(nn.Module):
         self.fc_out = nn.Linear(hidden_size + enc_output_dim, output_vocab_size)
         self.out_dropout = nn.Dropout(dropout)
 
-    def forward(self, input_step, hidden, cell, encoder_outputs, src_lengths):
+    def forward(self, input_step, hidden, cell, encoder_outputs, src_lengths, prev_context=None):
         """
         input_step: (batch_size,)
         hidden, cell: (num_layers, batch_size, hidden_size)
         encoder_outputs: (src_len, batch_size, enc_output_dim)
         """
+        batch_size = input_step.size(0)
+
+        if prev_context is None:
+            prev_context = torch.zeros(batch_size, self.enc_output_dim, device=input_step.device)
+
         input_step = input_step.unsqueeze(0)  # (1, batch)
         embedded = self.embedding(input_step)  # (1, batch, emb)
         embedded = self.embedding_dropout(embedded)
 
-        dec_hidden_last = hidden[-1]  # (batch, hidden)
-        context, _ = self.attention(dec_hidden_last, encoder_outputs, src_lengths)  # (batch, enc_dim)
-        context = context.unsqueeze(0)  # (1, batch, enc_dim)
-
-        lstm_input = torch.cat([embedded, context], dim=2)  # (1, batch, emb+enc_dim)
+        prev_context = prev_context.unsqueeze(0)  # (1, batch, enc_dim)
+        lstm_input = torch.cat([embedded, prev_context], dim=2)  # (1, batch, emb+enc_dim)
         outputs, (hidden, cell) = self.lstm(lstm_input, (hidden, cell))
 
         outputs = outputs.squeeze(0)  # (batch, hidden)
-        context = context.squeeze(0)  # (batch, enc_dim)
+        context, _ = self.attention(outputs, encoder_outputs, src_lengths)  # (batch, enc_dim)
         logits = self.fc_out(self.out_dropout(torch.cat([outputs, context], dim=1)))  # (batch, vocab)
-        return logits, hidden, cell
+        return logits, hidden, cell, context
 
 
 class Seq2Seq(nn.Module):
@@ -232,10 +234,11 @@ class Seq2SeqAttn(nn.Module):
         encoder_outputs, enc_state = self.encoder(src, src_lengths)
         hidden, cell = self._init_dec_state(enc_state)
 
+        context = None
         input_step = trg[0, :]
         for t in range(1, trg_len):
-            output, hidden, cell = self.decoder(
-                input_step, hidden, cell, encoder_outputs, src_lengths
+            output, hidden, cell, context = self.decoder(
+                input_step, hidden, cell, encoder_outputs, src_lengths, context
             )
             outputs[t] = output
 
